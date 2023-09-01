@@ -1,9 +1,6 @@
 import pyspark.sql.functions as F
-from tablehandler import TableHandler
+from classes.tablehandler import TableHandler
 import pyspark.sql.dataframe as dataframetype
-from util import log
-from variables import aws_data
-from moves3function import prepare_moving_folder
 
 
 class DeltaProcessing:
@@ -11,6 +8,7 @@ class DeltaProcessing:
             self,
             environment_data,
             spark,
+            logger,
             **kwargs
 
     ):
@@ -34,6 +32,7 @@ class DeltaProcessing:
         self.kwargs_param(**kwargs)
         self.tablehandler_bronze = TableHandler(self.spark)
         self.tablehandler_silver = TableHandler(self.spark)
+        self.logger = logger
         self.keys = []
 
     def kwargs_param(self, **kwargs):
@@ -54,7 +53,6 @@ class DeltaProcessing:
         self.param.update(kwargs)
         self.keys = list(self.param.keys())
 
-    @log.logs
     def run_query(self, df: dataframetype, prefix: str, operation: dict, sql_query: str):
         """
         Executa a query sql e prepara o dataframe pra bronze/silver
@@ -89,9 +87,7 @@ class DeltaProcessingBronze(DeltaProcessing):
         if not operation[table_name].get(sql_query):
             return
         self.kwargs_param(**kwargs)
-        fmsg = f'{DeltaProcessingBronze.__name__}.{self.run_bronze.__name__}'
-        logger = log.createLogger(fmsg)
-        logger.info(f"iniciando a bronze da {table_name}")
+        self.logger.info(f"iniciando a bronze da {table_name}")
         # declarando os locais da landingzone e da bronze
         pathlandzone = f"{self.environment_data['landing_zone']}/{table_name}/"
         pathbronze = f"{self.environment_data['bronze']}/{table_name}/"
@@ -100,15 +96,20 @@ class DeltaProcessingBronze(DeltaProcessing):
         try:
             dataframe = readlandzone.get_table(pathlandzone, self.param)
         except Exception as err:
-            logger.warning(f"landing zone para a base {table_name} vazia ou irregular, base ignorada")
-            logger.warning(err)
+            self.logger.warning(f"landing zone para a base {table_name} vazia ou irregular, base ignorada")
+            self.logger.warning(err)
             return
         # executando o metodo para executar a query sql da bronze
         try:
             dataframe = self.run_query(dataframe, table_name, operation, sql_query)
         except Exception as err:
-            logger.error(f"erro na execucao da query sql para bronze da base {table_name}: {err}")
-            logger.warning(f"devido ao erro da {table_name}, sera ignorada")
+            self.logger.error(f"erro na execucao da query sql para bronze da base {table_name}: {err}")
+            self.logger.warning(f"devido ao erro da {table_name}, sera ignorada")
+            return
+
+        if '_id' not in dataframe.columns:
+            self.logger.error(f"Erro: {table_name} não possui a chave unica _id criada")
+            self.logger.warning(f"devido ao erro ocorrido, a bronze {table_name} sera ignorada")
             return
 
         # criando a bronze se ela nao existir, ou realizando o upsert caso ja exista
@@ -127,13 +128,12 @@ class DeltaProcessingBronze(DeltaProcessing):
             self.tablehandler_bronze.upsert_deltatable(dataframe, operation[table_name]["label_orig"],
                                                        operation[table_name]["label_destino"],
                                                        operation[table_name]["condition"])
-        bucket = aws_data["landing_zone"].split("//")[-1]
-        prepare_moving_folder(bucket, f'{table_name}/')
 
         # coloca o dataframe disponivel para remocao caso spark precise de memoria
         dataframe.unpersist()
 
-        logger.info(f"bronze da {table_name} concluida")
+        self.logger.info(f"bronze da {table_name} concluida")
+        return True
 
 
 class DeltaProcessingSilver(DeltaProcessing):
@@ -148,17 +148,15 @@ class DeltaProcessingSilver(DeltaProcessing):
         if not operation[table_name].get(sql_query):
             return
         self.kwargs_param(**kwargs)
-        fmsg = f'{DeltaProcessingSilver.__name__}.{self.run_silver.__name__}'
-        logger = log.createLogger(fmsg)
-        logger.info(f"iniciando a silver da {table_name}")
+        self.logger.info(f"iniciando a silver da {table_name}")
         # declarando os locais da bronze e silver
         pathsilver = f"{self.environment_data['silver']}/{table_name}/"
         pathbronze = f"{self.environment_data['bronze']}/{table_name}/"
         # checando se a bronze ja existe
         self.tablehandler_bronze.set_deltatable_path(pathbronze)
         if not self.tablehandler_bronze.is_deltatable():
-            logger.error(f"bronze para a base {table_name} nao existe")
-            logger.warning(f"base ignorada")
+            self.logger.error(f"bronze para a base {table_name} nao existe")
+            self.logger.warning(f"base ignorada")
             return
         # transformando a bronze em um dataframe spark
         dataframe_bronze = self.tablehandler_bronze.get_deltatable().toDF()
@@ -166,13 +164,13 @@ class DeltaProcessingSilver(DeltaProcessing):
         try:
             dataframe = self.run_query(dataframe_bronze, table_name, operation, sql_query)
         except Exception as err:
-            logger.error(f"erro na execucao da query sql para silver da base {table_name}: {err}")
-            logger.warning(f"devido ao erro da {table_name}, sera ignorada")
+            self.logger.error(f"erro na execucao da query sql para silver da base {table_name}: {err}")
+            self.logger.warning(f"devido ao erro da {table_name}, sera ignorada")
             dataframe_bronze.unpersist()
             return
         # checando se o dataframe esta vazio
         if dataframe.isEmpty():
-            logger.warning(f"nao ha dados da bronze da base {table_name} para processamento, sera ignorada")
+            self.logger.warning(f"nao ha dados da bronze da base {table_name} para processamento, sera ignorada")
             dataframe_bronze.unpersist()
             dataframe.unpersist()
             return
@@ -204,7 +202,7 @@ class DeltaProcessingSilver(DeltaProcessing):
         dataframe_bronze.unpersist()
         dataframe.unpersist()
 
-        logger.info(f"silver da {table_name} concluida")
+        self.logger.info(f"silver da {table_name} concluida")
 
     def run_silver_nok(self, table_name: str, operation: dict, sql_query: str, **kwargs):
         """
@@ -217,17 +215,15 @@ class DeltaProcessingSilver(DeltaProcessing):
         if not operation[table_name].get(sql_query):
             return
         self.kwargs_param(**kwargs)
-        fmsg = f'{DeltaProcessingSilver.__name__}.{self.run_silver_nok.__name__}'
-        logger = log.createLogger(fmsg)
-        logger.info(f"iniciando a silver_nok da {table_name}")
+        self.logger.info(f"iniciando a silver_nok da {table_name}")
         # declarando os locais da bronze e silver nao ok
         pathsilver_nok = f"{self.environment_data['silver']}/{table_name}_nOK/"
         pathbronze = f"{self.environment_data['bronze']}/{table_name}/"
         # checando se a bronze ja existe
         self.tablehandler_bronze.set_deltatable_path(pathbronze)
         if not self.tablehandler_bronze.is_deltatable():
-            logger.error(f"bronze para a base {table_name} nao existe")
-            logger.warning(f"base ignorada")
+            self.logger.error(f"bronze para a base {table_name} nao existe")
+            self.logger.warning(f"base ignorada")
             return
         # transformando a bronze em um dataframe spark
         dataframe_bronze = self.tablehandler_bronze.get_deltatable().toDF()
@@ -235,13 +231,13 @@ class DeltaProcessingSilver(DeltaProcessing):
         try:
             dataframe = self.run_query(dataframe_bronze, table_name, operation, sql_query)
         except Exception as err:
-            logger.error(f"erro na execucao da query sql para silve da base {table_name}: {err}")
-            logger.warning(f"devido ao erro da {table_name}, sera ignorada")
+            self.logger.error(f"erro na execucao da query sql para silve da base {table_name}: {err}")
+            self.logger.warning(f"devido ao erro da {table_name}, sera ignorada")
             dataframe_bronze.unpersist()
             return
         # checando se o dataframe esta vazio
         if dataframe.isEmpty():
-            logger.warning(f"nao ha dados da bronze da base {table_name} para processamento, sera ignorada")
+            self.logger.warning(f"nao ha dados da bronze da base {table_name} para processamento, sera ignorada")
             dataframe_bronze.unpersist()
             dataframe.unpersist()
             return
@@ -273,4 +269,4 @@ class DeltaProcessingSilver(DeltaProcessing):
         dataframe_bronze.unpersist()
         dataframe.unpersist()
 
-        logger.info(f"silver_nok da {table_name} concluida")
+        self.logger.info(f"silver_nok da {table_name} concluida")

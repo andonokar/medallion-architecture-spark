@@ -1,5 +1,5 @@
 from delta.tables import *
-from tablehandler import TableHandler
+from classes.tablehandler import TableHandler
 from util import log
 
 
@@ -8,6 +8,7 @@ class DeltaProcessingGold:
             self,
             environment_data,
             spark,
+            logger,
             **kwargs
 
     ):
@@ -28,6 +29,7 @@ class DeltaProcessingGold:
         self.deltatables = []
         self.views = []
         self.tablehandler = TableHandler(spark)
+        self.logger = logger
 
     def kwargs_param(self, **kwargs):
         """
@@ -79,18 +81,25 @@ class DeltaProcessingGold:
         :param operations: dicionario com as operacoes da gold
         :param path: o caminho para a gold ser instanciada
         """
+        # checando a configuracao de upsert silver
+        tables_silver = operations.get("tables_silver")
+        if not tables_silver:
+            raise KeyError('a chave table_silver nao esta configurada e o upsert_silver = true')
         # instanciando a delta table
         tablehandlergold = TableHandler(self.spark, path)
         # checando se a deltatable ja existe
         if tablehandlergold.is_deltatable():
             # fazendo iteracao entre as silvers
-            for index, val in enumerate(operations["tables_silver"]["tables"]):
+            for val in operations["join_operations"]["tables"]:
+                upsert_config = tables_silver.get(val)
+                if not upsert_config:
+                    continue
                 tablehandlersilver = TableHandler(self.spark,
                                                   f"{self.environment_data[self.param['step']['silver']]}/{val}/")
 
                 deltatable_gold = tablehandlergold.get_deltatable()
                 tablehandlersilver.upsert_table(deltatable_gold, operations["label_orig"],
-                                                val, operations["tables_silver"]["conditions"][index],
+                                                val, upsert_config["conditions"],
                                                 operations["match_filds"])
 
     def run_gold(self, operations: dict, query_sql: str, **kwargs):
@@ -101,9 +110,7 @@ class DeltaProcessingGold:
         :param kwargs:
         :return:
         """
-        fmsg = f'{DeltaProcessingGold.__name__}.{self.run_gold.__name__}'
-        logger = log.createLogger(fmsg)
-        logger.info(f"iniciando a gold da {operations['table_name']}")
+        self.logger.info(f"iniciando a gold da {operations['table_name']}")
         self.kwargs_param(**kwargs)
         # criando uma lista com as tabelas
         tables = operations["join_operations"]["tables"]
@@ -113,16 +120,22 @@ class DeltaProcessingGold:
         self.views.clear()
         # realizando a iteracao entre as bases silver e criando as views sql para cada silver e removendo dataframe da memoria
         for index, table in enumerate(tables):
-            self.tablehandler.set_deltatable_path(f"{self.environment_data[self.param['step']['silver']]}/{table}/")
-            self.deltatables.append(self.tablehandler.get_deltatable().toDF())
+            path = f"{self.environment_data[self.param['step']['silver']]}/{table}/"
+            self.tablehandler.set_deltatable_path(path)
+            if self.tablehandler.is_deltatable():
+                self.deltatables.append(self.tablehandler.get_deltatable().toDF())
+            else:
+                self.logger.error(f'nao existe silver com path {path}')
+                self.logger.warning(f"devido ao erro da {operations['table_name']}, sera ignorada")
+                return
             self.views.append(self.deltatables[index].createOrReplaceTempView(tables[index]))
             self.deltatables[index].unpersist()
         # executando a query sql de cruzamentos para a gold
         try:
             df = self.spark.sql(operations[query_sql])
         except Exception as err:
-            logger.error(f"erro na execucao da query sql para gold da base {operations['table_name']}: {err}")
-            logger.warning(f"devido ao erro da {operations['table_name']}, sera ignorada")
+            self.logger.error(f"erro na execucao da query sql para gold da base {operations['table_name']}: {err}")
+            self.logger.warning(f"devido ao erro da {operations['table_name']}, sera ignorada")
             return
 
         # removendo duplicados caso necessario
@@ -130,7 +143,7 @@ class DeltaProcessingGold:
 
         # checando se o dataframe da query veio vazio
         if df.isEmpty():
-            logger.warning(f"nao ha dados da silver das bases {tables} para processamento, sera ignorada")
+            self.logger.warning(f"nao ha dados da silver das bases {tables} para processamento, sera ignorada")
             return
 
         for name in tables:
@@ -138,8 +151,8 @@ class DeltaProcessingGold:
         # caminho em que a gold sera salvo
         path_to_save = f"{self.environment_data[self.param['step']['gold']]}/{operations['table_name']}/"
         if '_id' not in df.columns:
-            logger.error(f"Erro: {operations['table_name']} não possui a chave unica _id criada")
-            logger.warning(f"devido ao erro ocorrido, a gold {operations['table_name']} sera ignorada")
+            self.logger.error(f"Erro: {operations['table_name']} não possui a chave unica _id criada")
+            self.logger.warning(f"devido ao erro ocorrido, a gold {operations['table_name']} sera ignorada")
             return
 
         self.save_update_table(df, operations, path_to_save)
@@ -148,7 +161,6 @@ class DeltaProcessingGold:
             try:
                 self._update_silver_tables(operations, path_to_save)
             except Exception as err:
-                logger.error(f"erro na atualizando as silvers que geram a tabela {operations['table_name']}: {err}")
+                self.logger.error(f"erro na atualizando as silvers que geram a tabela {operations['table_name']}: {err}")
 
-        logger.info(f"gold da {operations['table_name']} concluida com sucesso")
-
+        self.logger.info(f"gold da {operations['table_name']} concluida com sucesso")

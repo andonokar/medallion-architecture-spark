@@ -1,0 +1,3 @@
+telecom: # the client name
+  bucket: test-conf-domrock # the bucket where the configuration file for the client is
+  key: spark_telecom.yaml # the file key inside the bucket(has to be yaml format)

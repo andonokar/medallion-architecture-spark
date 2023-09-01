@@ -1,0 +1,48 @@
+movefolder: # configuration for processed files in landing zone
+  destinationbucket: datalake-processed-files-933447815926 # the bucket the files will go to
+  firstfoldername: LANDINGZONEFILES/ # the prefix for specification that is for landing zone files
+aws_data: # the hadoop-aws file path configuration
+  landing_zone: s3a://landingzone-933447815926 # path for landing zone
+  bronze: s3a://datalake-bronze-933447815926 # path for bronze
+  silver: s3a://datalake-silver-933447815926 # path for silver
+  gold: s3a://datalake-gold-933447815926 # path for gold
+transform_data: # configuration for the transformation in the tables
+  RPA: # the table/folder name of the client
+    format: avro # format of the file in landing zone | accepted: csv, avro, parquet, json, delta | default: parquet
+    insert_fields: # 2 fields will be inserted, and only 2, others will be ignored
+    - processed # field name that will contains if the row is processed or not
+    - creationDate # field name thar will contains the date it joined the delta table
+    primary_key: _id # the field name for primary key unique to each row
+    sql_create_id: # sql query that creates bronze
+    table_tmp: RPA # name for the temp view in spark, use for query in bronze, silver
+    sql_create_silver: # sql query that creates silver
+    sql_create_silver_nOK: # optional, sql query that creates silver_nOK | use when there is need to store refused rows based on a validation
+    label_orig: table_origem # label for upsert
+    label_destino: table_destino # label for upsert
+    condition: table_destino._id = table_origem._id # condition to match in upsert
+    match_filds:
+      processed: 'true' # set processed to true when upsert matches
+gold_operations: # configuration for the agreggation of silver tables
+  gold_operations_funil: # the gold operation name
+    join_operations: # configuration for joining silver tables
+      tables: # list of tables that will be used for the gold operation
+      - USUARIOLEAD
+      - DBCRM
+      - DBPROCESSO_PRECATORIOLEAD
+    primary_key: _id # the field name for primary key unique to each row
+    sql_query: # sql query that generates the gold table
+    table_name: FUNIL_EVENTO # name of the gold table
+    table_step: # value association for upserting/loading silver and gold tables
+      silver: silver
+      gold: gold
+    label_orig: table_origem # label for upsert
+    label_destino: table_destino # label for upsert
+    condition: table_destino._id = table_origem._id # condition to match in upsert
+    match_filds:
+      processed: 'true' # set processed to true when upsert matches
+    upsert_silver: 'true' # set false if there is need to maintain silver rows reprocessing every time
+    tables_silver: # configuration for the upsert in silver tables, only use when upsert_silver is set to true
+      USUARIOLEAD: # silver table name
+        conditions: USUARIOLEAD.documento_credor_rpa = table_origem.documento_credor_rpa # condition for silver upsert
+      DBCRM:
+        conditions: DBCRM.documento_e = table_origem.documento_credor_rpa
